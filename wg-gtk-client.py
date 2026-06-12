@@ -220,7 +220,7 @@ class VPNWindow(Gtk.Window):
         foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         foot.set_border_width(10)
         credit = Gtk.LinkButton(uri="https://www.thern.io",
-                                label="By Thean AI Solutions")
+                                label="By Thern AI Solutions")
         credit.set_relief(Gtk.ReliefStyle.NONE)
         foot.pack_start(credit, False, False, 0)
         self.refresh_btn = Gtk.Button(label="↻ Refresh")

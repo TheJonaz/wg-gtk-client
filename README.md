@@ -103,4 +103,4 @@ spurious spikes.
 
 ---
 
-By [Thean AI Solutions](https://www.thern.io)
+By [Thern AI Solutions](https://www.thern.io)
