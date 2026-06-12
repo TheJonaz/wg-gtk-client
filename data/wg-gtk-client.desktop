@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WireGuard Client
+GenericName=VPN Controller
+Comment=Start, restart and stop a WireGuard tunnel with live traffic stats
+Exec=wg-gtk-client
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;GTK;
+Keywords=vpn;wireguard;tunnel;wg;
+StartupNotify=true
