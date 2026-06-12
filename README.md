@@ -100,3 +100,7 @@ spurious spikes.
 ## License
 
 [MIT](LICENSE) © 2026 Jonaz Thern
+
+---
+
+By [Thean AI Solutions](https://www.thern.io)
