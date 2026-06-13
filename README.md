@@ -7,7 +7,7 @@ kill switch, a connection watchdog and dual-stack public-IP reporting.
 No daemon, no background service, no stored credentials — a single Python
 script that talks to `wg-quick` through `pkexec`.
 
-![screenshot](docs/screenshot.png)
+![screenshot](docs/screenshot-app.png)
 
 ## Features
 
