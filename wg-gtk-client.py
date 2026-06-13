@@ -27,6 +27,7 @@ import configparser
 import locale
 import os
 import shutil
+from collections import deque
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -468,13 +469,15 @@ class VPNWindow(Gtk.Window):
         self.vpn_ip = vpn_ip or settings.get("vpn_ip") or None
         self.vpn_ip6 = vpn_ip6 or settings.get("vpn_ip6") or None
         self.check_public_ip = check_public_ip
-        self.set_default_size(400, 560)
+        self.set_default_size(400, 700)
         self.set_resizable(False)
         self.set_border_width(0)
 
         self.busy = False
         self._prev = None           # (time, rx, tx)
         self._rates = (None, None)
+        self._spd_hist = deque(maxlen=120)   # (down_bps, up_bps) ~10 min
+        self._traf_hist = deque(maxlen=120)  # (rx_total, tx_total)
         self._dead_strikes = 0      # watchdog
         self._was_up = None
         self._log = []
@@ -566,13 +569,27 @@ class VPNWindow(Gtk.Window):
         self.tr_out = _row(traf, 2, _("↑  Out (sent)"), "traf-val")
         self.tr_total = _row(traf, 3, _("Σ  Total"), "traf-total")
 
+        self.traffic_area = Gtk.DrawingArea()
+        self.traffic_area.set_size_request(-1, 58)
+        self.traffic_area.set_hexpand(True)
+        self.traffic_area.set_margin_top(6)
+        self.traffic_area.connect("draw", self._draw_traffic)
+        traf.attach(self.traffic_area, 0, 4, 2, 1)
+
         sphead = Gtk.Label(label=_("SPEED (current)"))
         sphead.get_style_context().add_class("traf-head")
         sphead.set_xalign(0)
         sphead.set_margin_top(8)
-        traf.attach(sphead, 0, 4, 2, 1)
-        self.sp_down = _row(traf, 5, _("↓  Down"), "traf-val")
-        self.sp_up = _row(traf, 6, _("↑  Up"), "traf-val")
+        traf.attach(sphead, 0, 5, 2, 1)
+        self.sp_down = _row(traf, 6, _("↓  Down"), "traf-val")
+        self.sp_up = _row(traf, 7, _("↑  Up"), "traf-val")
+
+        self.speed_area = Gtk.DrawingArea()
+        self.speed_area.set_size_request(-1, 58)
+        self.speed_area.set_hexpand(True)
+        self.speed_area.set_margin_top(6)
+        self.speed_area.connect("draw", self._draw_speed)
+        traf.attach(self.speed_area, 0, 8, 2, 1)
         outer.pack_start(traf, False, False, 0)
         outer.pack_start(Gtk.Separator(), False, False, 0)
 
@@ -862,6 +879,9 @@ class VPNWindow(Gtk.Window):
                 w.set_text("–")
             self._prev = None
             self._rates = (None, None)
+            self._spd_hist.clear()
+            self._traf_hist.clear()
+            self._redraw_graphs()
             return
         rx, tx = t
         self.tr_in.set_text(human_bytes(rx))
@@ -879,6 +899,88 @@ class VPNWindow(Gtk.Window):
         down, upp = self._rates
         self.sp_down.set_text(human_rate(down))
         self.sp_up.set_text(human_rate(upp))
+        self._spd_hist.append((down or 0.0, upp or 0.0))
+        self._traf_hist.append((rx, tx))
+        self._redraw_graphs()
+
+    # ---------- live graphs (Cairo, no extra deps) ----------
+    def _redraw_graphs(self):
+        for a in (getattr(self, "traffic_area", None),
+                  getattr(self, "speed_area", None)):
+            if a is not None:
+                a.queue_draw()
+
+    def _theme_fg(self):
+        rgba = self.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        return (rgba.red, rgba.green, rgba.blue)
+
+    # series colors: In/Down green #2ecc71, Out/Up orange #e67e22
+    _C_DOWN = (0.18, 0.80, 0.44)
+    _C_UP = (0.90, 0.49, 0.13)
+
+    def _plot(self, area, cr, series, scale_label):
+        w = area.get_allocated_width()
+        h = area.get_allocated_height()
+        fr, fg, fb = self._theme_fg()
+        pad = 2
+        cr.set_source_rgba(fr, fg, fb, 0.12)
+        cr.set_line_width(1)
+        cr.rectangle(0.5, 0.5, w - 1, h - 1)
+        cr.stroke()
+
+        allvals = [v for data, _c in series for v in data]
+        maxv = max(allvals) if allvals else 0.0
+        label = scale_label(maxv)
+        if maxv > 0:
+            scale = maxv * 1.12
+            n = max((len(data) for data, _c in series), default=0)
+            if n >= 2:
+                def x(i):
+                    return pad + (w - 2 * pad) * i / (n - 1)
+
+                def y(v):
+                    return h - pad - (h - 2 * pad) * (v / scale)
+
+                for data, (rc, gc, bc) in series:
+                    if len(data) < 2:
+                        continue
+                    off = n - len(data)
+                    cr.move_to(x(off), h - pad)
+                    for i, v in enumerate(data):
+                        cr.line_to(x(off + i), y(v))
+                    cr.line_to(x(off + len(data) - 1), h - pad)
+                    cr.close_path()
+                    cr.set_source_rgba(rc, gc, bc, 0.16)
+                    cr.fill()
+                    cr.set_line_width(1.5)
+                    cr.set_source_rgba(rc, gc, bc, 0.9)
+                    cr.move_to(x(off), y(data[0]))
+                    for i, v in enumerate(data):
+                        cr.line_to(x(off + i), y(v))
+                    cr.stroke()
+
+        # scale label (top-right)
+        cr.set_source_rgba(fr, fg, fb, 0.55)
+        cr.select_font_face("monospace")
+        cr.set_font_size(10)
+        ext = cr.text_extents(label)
+        cr.move_to(w - ext.width - 4, 12)
+        cr.show_text(label)
+        return False
+
+    def _draw_speed(self, area, cr):
+        down = [d for d, u in self._spd_hist]
+        up = [u for d, u in self._spd_hist]
+        return self._plot(area, cr,
+                          [(down, self._C_DOWN), (up, self._C_UP)],
+                          lambda m: human_bytes(m) + "/s")
+
+    def _draw_traffic(self, area, cr):
+        rin = [r for r, t in self._traf_hist]
+        rout = [t for r, t in self._traf_hist]
+        return self._plot(area, cr,
+                          [(rin, self._C_DOWN), (rout, self._C_UP)],
+                          human_bytes)
 
     def _ip_worker(self):
         ip4 = fetch_public_ip(4)
