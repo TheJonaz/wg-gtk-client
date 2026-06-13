@@ -25,6 +25,8 @@ Options:
 """
 
 import argparse
+import locale
+import os
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -38,9 +40,76 @@ WG_QUICK = "/usr/bin/wg-quick"
 IP_BIN = "/usr/sbin/ip"
 PUBLIC_IP_URL = "https://ifconfig.me"
 
+
+# ---------------------------------------------------------------------------
+# Localisation: follow the system locale (LANG/LC_*). Swedish and English are
+# bundled; any other locale falls back to the English source strings. The
+# semantic status colours (green/red/orange) stay fixed, but every text colour
+# is taken from the active GTK theme so the UI is readable in light or dark.
+# ---------------------------------------------------------------------------
+def _detect_lang():
+    for env in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        val = os.environ.get(env)
+        if val:
+            return val[:2].lower()
+    try:
+        loc = locale.getdefaultlocale()[0]
+        if loc:
+            return loc[:2].lower()
+    except Exception:
+        pass
+    return "en"
+
+
+TRANSLATIONS = {
+    "sv": {
+        "interface {iface}": "gränssnitt {iface}",
+        "Checking …": "Kontrollerar …",
+        "Connected": "Ansluten",
+        "Disconnected": "Frånkopplad",
+        "Working …": "Arbetar …",
+        "Tunnel is down": "Tunneln är nere",
+        "TRAFFIC (since tunnel started)": "TRAFIK (sedan tunneln startade)",
+        "↓  In (received)": "↓  In (mottaget)",
+        "↑  Out (sent)": "↑  Ut (skickat)",
+        "Σ  Total": "Σ  Totalt",
+        "SPEED (current)": "HASTIGHET (aktuell)",
+        "↓  Down": "↓  Ner",
+        "↑  Up": "↑  Upp",
+        "Start": "Starta",
+        "Restart": "Starta om",
+        "Stop": "Stoppa",
+        "↻ Refresh": "↻ Uppdatera",
+        "measuring …": "mäter …",
+        "Stack: {fams}": "Stack: {fams}",
+        "Stack: unknown": "Stack: okänd",
+        "Checking public IP …": "Kontrollerar publik IP …",
+        "Public IP: {ip}  ✓ via VPN": "Publik IP: {ip}  ✓ via VPN",
+        "Public IP: {ip}  (⚠ not the VPN IP)":
+            "Publik IP: {ip}  (⚠ inte VPN-IP:n)",
+        "Public IP: {ip}": "Publik IP: {ip}",
+        "Public IP: unavailable": "Publik IP: ej tillgänglig",
+        "Could not {verb} the tunnel": "Kunde inte {verb} tunneln",
+        "Cancelled (no password entered).":
+            "Avbruten (inget lösenord angavs).",
+        "Unknown error": "Okänt fel",
+        "start": "starta",
+        "stop": "stoppa",
+        "restart": "starta om",
+    },
+}
+
+LANG = _detect_lang()
+
+
+def _(s):
+    """Translate a UI string for the active locale; fall back to English."""
+    return TRANSLATIONS.get(LANG, {}).get(s, s)
+
+
 CSS = b"""
 .title       { font-size: 16px; font-weight: bold; }
-.subtle      { color: #000; font-size: 11px; }
+.subtle      { font-size: 11px; opacity: 0.65; }
 .status-on   { color: #2ecc71; font-weight: bold; font-size: 14px; }
 .status-off  { color: #e74c3c; font-weight: bold; font-size: 14px; }
 .status-wait { color: #f39c12; font-weight: bold; font-size: 14px; }
@@ -49,10 +118,13 @@ CSS = b"""
 .dot-off     { color: #e74c3c; }
 .dot-wait    { color: #f39c12; }
 button.suggested-action { font-weight: bold; }
-.traf-label  { color: #000; font-size: 12px; }
+.traf-label  { color: @theme_fg_color; font-size: 12px; }
 .traf-val    { font-family: monospace; font-size: 13px; }
 .traf-total  { font-family: monospace; font-size: 13px; font-weight: bold; }
-.traf-head   { color: #000; font-size: 11px; font-weight: bold; }
+.traf-head   { color: @theme_fg_color; font-size: 11px; font-weight: bold; }
+.credit, .credit:link, .credit:visited, .credit > label {
+    color: @theme_fg_color; font-size: 11px; font-weight: bold;
+}
 """
 
 
@@ -61,6 +133,29 @@ def iface_up(name):
     r = subprocess.run([IP_BIN, "link", "show", name],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r.returncode == 0
+
+
+def iface_protocols(name):
+    """Return (has_ipv4, has_ipv6) for addresses assigned to the interface.
+    Link-local IPv6 (fe80::) is ignored. No privileges required."""
+    try:
+        out = subprocess.run([IP_BIN, "-o", "addr", "show", "dev", name],
+                             capture_output=True, text=True)
+    except Exception:
+        return (False, False)
+    if out.returncode != 0:
+        return (False, False)
+    has4 = has6 = False
+    for line in out.stdout.splitlines():
+        toks = line.split()
+        if "inet" in toks:
+            has4 = True
+        if "inet6" in toks:
+            # ignore link-local addresses (fe80::/10)
+            i = toks.index("inet6")
+            if i + 1 < len(toks) and not toks[i + 1].lower().startswith("fe80:"):
+                has6 = True
+    return (has4, has6)
 
 
 def fetch_public_ip(timeout=7):
@@ -103,7 +198,7 @@ def human_bytes(n):
 def human_rate(bps):
     """Format bytes/second. None => measuring."""
     if bps is None:
-        return "measuring …"
+        return _("measuring …")
     return human_bytes(bps) + "/s"
 
 
@@ -134,7 +229,7 @@ class VPNWindow(Gtk.Window):
         title = Gtk.Label(label="WireGuard VPN")
         title.get_style_context().add_class("title")
         title.set_xalign(0)
-        sub = Gtk.Label(label=f"interface {interface}")
+        sub = Gtk.Label(label=_("interface {iface}").format(iface=interface))
         sub.get_style_context().add_class("subtle")
         sub.set_xalign(0)
         header.pack_start(title, False, False, 0)
@@ -148,14 +243,18 @@ class VPNWindow(Gtk.Window):
         self.dot = Gtk.Label(label="●")
         self.dot.get_style_context().add_class("dot")
         col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.status_lbl = Gtk.Label(label="Checking …")
+        self.status_lbl = Gtk.Label(label=_("Checking …"))
         self.status_lbl.set_xalign(0)
         self.detail_lbl = Gtk.Label(label="")
         self.detail_lbl.get_style_context().add_class("subtle")
         self.detail_lbl.set_xalign(0)
         self.detail_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self.proto_lbl = Gtk.Label(label="")
+        self.proto_lbl.get_style_context().add_class("subtle")
+        self.proto_lbl.set_xalign(0)
         col.pack_start(self.status_lbl, False, False, 0)
         col.pack_start(self.detail_lbl, False, False, 0)
+        col.pack_start(self.proto_lbl, False, False, 0)
         statusbox.pack_start(self.dot, False, False, 0)
         statusbox.pack_start(col, True, True, 0)
         outer.pack_start(statusbox, False, False, 0)
@@ -164,7 +263,7 @@ class VPNWindow(Gtk.Window):
         # --- Traffic + speed ---
         traf = Gtk.Grid(column_spacing=14, row_spacing=4)
         traf.set_border_width(16)
-        head = Gtk.Label(label="TRAFFIC (since tunnel started)")
+        head = Gtk.Label(label=_("TRAFFIC (since tunnel started)"))
         head.get_style_context().add_class("traf-head")
         head.set_xalign(0)
         traf.attach(head, 0, 0, 2, 1)
@@ -181,17 +280,17 @@ class VPNWindow(Gtk.Window):
             grid.attach(val, 1, row, 1, 1)
             return val
 
-        self.tr_in = _row(traf, 1, "↓  In (received)", "traf-val")
-        self.tr_out = _row(traf, 2, "↑  Out (sent)", "traf-val")
-        self.tr_total = _row(traf, 3, "Σ  Total", "traf-total")
+        self.tr_in = _row(traf, 1, _("↓  In (received)"), "traf-val")
+        self.tr_out = _row(traf, 2, _("↑  Out (sent)"), "traf-val")
+        self.tr_total = _row(traf, 3, _("Σ  Total"), "traf-total")
 
-        sphead = Gtk.Label(label="SPEED (current)")
+        sphead = Gtk.Label(label=_("SPEED (current)"))
         sphead.get_style_context().add_class("traf-head")
         sphead.set_xalign(0)
         sphead.set_margin_top(8)
         traf.attach(sphead, 0, 4, 2, 1)
-        self.sp_down = _row(traf, 5, "↓  Down", "traf-val")
-        self.sp_up = _row(traf, 6, "↑  Up", "traf-val")
+        self.sp_down = _row(traf, 5, _("↓  Down"), "traf-val")
+        self.sp_up = _row(traf, 6, _("↑  Up"), "traf-val")
         outer.pack_start(traf, False, False, 0)
         outer.pack_start(Gtk.Separator(), False, False, 0)
 
@@ -200,14 +299,14 @@ class VPNWindow(Gtk.Window):
         btns.set_border_width(16)
         btns.set_homogeneous(True)
 
-        self.btn_start = Gtk.Button(label="Start")
+        self.btn_start = Gtk.Button(label=_("Start"))
         self.btn_start.get_style_context().add_class("suggested-action")
         self.btn_start.connect("clicked", lambda *_: self.do_action("up"))
 
-        self.btn_restart = Gtk.Button(label="Restart")
+        self.btn_restart = Gtk.Button(label=_("Restart"))
         self.btn_restart.connect("clicked", lambda *_: self.do_action("restart"))
 
-        self.btn_stop = Gtk.Button(label="Stop")
+        self.btn_stop = Gtk.Button(label=_("Stop"))
         self.btn_stop.get_style_context().add_class("destructive-action")
         self.btn_stop.connect("clicked", lambda *_: self.do_action("down"))
 
@@ -220,10 +319,11 @@ class VPNWindow(Gtk.Window):
         foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         foot.set_border_width(10)
         credit = Gtk.LinkButton(uri="https://www.thern.io",
-                                label="By Thern AI Solutions")
+                                label="By Jonaz Thern")
         credit.set_relief(Gtk.ReliefStyle.NONE)
+        credit.get_style_context().add_class("credit")
         foot.pack_start(credit, False, False, 0)
-        self.refresh_btn = Gtk.Button(label="↻ Refresh")
+        self.refresh_btn = Gtk.Button(label=_("↻ Refresh"))
         self.refresh_btn.set_relief(Gtk.ReliefStyle.NONE)
         self.refresh_btn.get_style_context().add_class("subtle")
         self.refresh_btn.connect("clicked", lambda *_: self.refresh(check_ip=True))
@@ -242,11 +342,28 @@ class VPNWindow(Gtk.Window):
     def refresh(self, check_ip=False):
         up = iface_up(self.interface)
         self._render(up)
+        self.update_protocols(up)
         self.update_traffic(up)
         if up and check_ip and self.check_public_ip:
-            self.detail_lbl.set_text("Checking public IP …")
+            self.detail_lbl.set_text(_("Checking public IP …"))
             threading.Thread(target=self._ip_worker, daemon=True).start()
         return False
+
+    def update_protocols(self, up):
+        if not up:
+            self.proto_lbl.set_text("")
+            return
+        has4, has6 = iface_protocols(self.interface)
+        fams = []
+        if has4:
+            fams.append("IPv4")
+        if has6:
+            fams.append("IPv6")
+        if fams:
+            self.proto_lbl.set_text(
+                _("Stack: {fams}").format(fams=" + ".join(fams)))
+        else:
+            self.proto_lbl.set_text(_("Stack: unknown"))
 
     def update_traffic(self, up):
         t = read_traffic(self.interface) if up else None
@@ -287,13 +404,14 @@ class VPNWindow(Gtk.Window):
         if not iface_up(self.interface):
             return False
         if ip and self.vpn_ip and ip == self.vpn_ip:
-            self.detail_lbl.set_text(f"Public IP: {ip}  ✓ via VPN")
+            self.detail_lbl.set_text(_("Public IP: {ip}  ✓ via VPN").format(ip=ip))
         elif ip and self.vpn_ip:
-            self.detail_lbl.set_text(f"Public IP: {ip}  (⚠ not the VPN IP)")
+            self.detail_lbl.set_text(
+                _("Public IP: {ip}  (⚠ not the VPN IP)").format(ip=ip))
         elif ip:
-            self.detail_lbl.set_text(f"Public IP: {ip}")
+            self.detail_lbl.set_text(_("Public IP: {ip}").format(ip=ip))
         else:
-            self.detail_lbl.set_text("Public IP: unavailable")
+            self.detail_lbl.set_text(_("Public IP: unavailable"))
         return False
 
     def _render(self, up, waiting=False):
@@ -306,14 +424,14 @@ class VPNWindow(Gtk.Window):
 
         if waiting:
             ctx.add_class("dot-wait"); sctx.add_class("status-wait")
-            self.status_lbl.set_text("Working …")
+            self.status_lbl.set_text(_("Working …"))
         elif up:
             ctx.add_class("dot-on"); sctx.add_class("status-on")
-            self.status_lbl.set_text("Connected")
+            self.status_lbl.set_text(_("Connected"))
         else:
             ctx.add_class("dot-off"); sctx.add_class("status-off")
-            self.status_lbl.set_text("Disconnected")
-            self.detail_lbl.set_text("Tunnel is down")
+            self.status_lbl.set_text(_("Disconnected"))
+            self.detail_lbl.set_text(_("Tunnel is down"))
 
         self.btn_start.set_sensitive(not up and not waiting)
         self.btn_restart.set_sensitive(up and not waiting)
@@ -341,9 +459,9 @@ class VPNWindow(Gtk.Window):
             if r.returncode != 0:
                 # pkexec cancelled by the user = 126/127
                 if r.returncode in (126, 127):
-                    err = "Cancelled (no password entered)."
+                    err = _("Cancelled (no password entered).")
                 else:
-                    err = (r.stderr or r.stdout or "Unknown error").strip()
+                    err = (r.stderr or r.stdout or _("Unknown error")).strip()
         except Exception as e:
             err = str(e)
         GLib.idle_add(self._action_done, err, action)
@@ -356,7 +474,8 @@ class VPNWindow(Gtk.Window):
                 transient_for=self, modal=True,
                 message_type=Gtk.MessageType.WARNING,
                 buttons=Gtk.ButtonsType.OK,
-                text=f"Could not {self._verb(action)} the tunnel")
+                text=_("Could not {verb} the tunnel").format(
+                    verb=self._verb(action)))
             dlg.format_secondary_text(err)
             dlg.run()
             dlg.destroy()
@@ -364,8 +483,8 @@ class VPNWindow(Gtk.Window):
 
     @staticmethod
     def _verb(action):
-        return {"up": "start", "down": "stop",
-                "restart": "restart"}.get(action, action)
+        return {"up": _("start"), "down": _("stop"),
+                "restart": _("restart")}.get(action, action)
 
 
 def parse_args(argv=None):
