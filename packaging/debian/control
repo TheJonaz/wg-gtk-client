@@ -1,0 +1,14 @@
+Package: wg-gtk-client
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: all
+Depends: python3, python3-gi, gir1.2-gtk-3.0, wireguard-tools, policykit-1, curl, nftables, iputils-ping
+Recommends: gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7
+Maintainer: Jonaz Thern <jonaz@thern.io>
+Homepage: https://github.com/TheJonaz/wg-gtk-client
+Description: Minimal GTK desktop client for WireGuard
+ Start, stop and monitor a WireGuard tunnel from a small GTK window with
+ live graphs, a kill switch, a connection watchdog, reconnect-on-network-change
+ and dual-stack public-IP reporting. Privileged actions go through pkexec; no
+ daemon and no stored credentials.

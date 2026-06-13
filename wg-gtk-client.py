@@ -26,12 +26,11 @@ import argparse
 import configparser
 import locale
 import os
-import shutil
 from collections import deque
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, Pango, Gdk
+from gi.repository import Gtk, GLib, Pango
 
 import subprocess
 import threading
@@ -178,6 +177,13 @@ TRANSLATIONS = {
         "Speed": "Hastighet",
         "Traffic": "Trafik",
         "Latency": "Latens",
+        "Reconnect on network change": "Återanslut vid nätverksbyte",
+        "Restart the tunnel when the underlying network changes":
+            "Starta om tunneln när underliggande nätverk ändras",
+        "Network changed": "Nätverket ändrades",
+        "Data cap reached": "Datatak nått",
+        "{used} used this session": "{used} använt denna session",
+        "Data cap (GiB, 0 = off)": "Datatak (GiB, 0 = av)",
     },
 }
 
@@ -231,6 +237,8 @@ class Settings:
         "killswitch": "false",
         "autostart": "false",
         "graph": "speed",
+        "datacap_gib": "0",
+        "reconnect_netchange": "false",
     }
 
     def __init__(self):
@@ -361,6 +369,23 @@ def path_mtu_ok(target, mtu, family=4):
         return r.returncode == 0
     except Exception:
         return None
+
+
+def wan_signature():
+    """Short signature of the physical default route (gateway/dev/src), used to
+    detect that the underlying network changed. Tunnel routes are ignored.
+    No privileges required."""
+    try:
+        out = subprocess.run([IP_BIN, "-o", "route", "show", "default"],
+                             capture_output=True, text=True, timeout=4)
+    except Exception:
+        return None
+    sigs = []
+    for line in out.stdout.splitlines():
+        if " dev wg" in line or " dev tun" in line:
+            continue
+        sigs.append(" ".join(line.split()))
+    return " | ".join(sorted(sigs)) or None
 
 
 def ping_latency(target="1.1.1.1", timeout=2):
@@ -510,6 +535,8 @@ class VPNWindow(Gtk.Window):
         self._lat_hist = deque(maxlen=120)   # latency ms
         self._up_since = None       # monotonic time the tunnel came up
         self._graph_mode = self.settings.get("graph") or "speed"
+        self._cap_warned = False    # data-cap notification fired this session
+        self._wan_sig = None        # physical default-route signature
         self._dead_strikes = 0      # watchdog
         self._was_up = None
         self._log = []
@@ -652,13 +679,17 @@ class VPNWindow(Gtk.Window):
             tg, 1, _("Auto-reconnect"),
             _("Restart the tunnel automatically if it goes dead"),
             self.settings.getbool("watchdog"), self._on_watchdog)
+        self.sw_netchg = self._toggle_row(
+            tg, 2, _("Reconnect on network change"),
+            _("Restart the tunnel when the underlying network changes"),
+            self.settings.getbool("reconnect_netchange"), self._on_netchange)
         self.sw_notify = self._toggle_row(
-            tg, 2, _("Notifications"), "",
+            tg, 3, _("Notifications"), "",
             self.settings.getbool("notifications") and HAVE_NOTIFY,
             self._on_notify)
         self.sw_notify.set_sensitive(HAVE_NOTIFY)
         self.sw_autostart = self._toggle_row(
-            tg, 3, _("Start at login"), "",
+            tg, 4, _("Start at login"), "",
             os.path.exists(AUTOSTART_FILE), self._on_autostart)
         outer.pack_start(tg, False, False, 0)
         outer.pack_start(Gtk.Separator(), False, False, 0)
@@ -803,6 +834,11 @@ class VPNWindow(Gtk.Window):
             self._dead_strikes = 0
         return False
 
+    def _on_netchange(self, sw, state):
+        self.settings.set("reconnect_netchange", bool(state))
+        self._wan_sig = wan_signature()  # reset baseline
+        return False
+
     def _on_autostart(self, sw, state):
         try:
             if state:
@@ -857,10 +893,24 @@ class VPNWindow(Gtk.Window):
         if not self.busy:
             self.refresh(check_ip=False)
             self._watchdog_check()
+            self._netchange_check()
             if iface_up(self.interface):
                 threading.Thread(target=self._latency_worker,
                                  daemon=True).start()
         return True
+
+    def _netchange_check(self):
+        sig = wan_signature()
+        if self._wan_sig is None:
+            self._wan_sig = sig
+            return
+        if sig is not None and sig != self._wan_sig:
+            self._wan_sig = sig
+            if (self.settings.getbool("reconnect_netchange")
+                    and iface_up(self.interface) and not self.busy):
+                self._add_log("network changed → restart")
+                self._notify(_("Network changed"), _("Reconnecting …"))
+                self.do_action("restart")
 
     def _latency_worker(self):
         ms = ping_latency()
@@ -955,12 +1005,19 @@ class VPNWindow(Gtk.Window):
             self._rates = (None, None)
             self._spd_hist.clear()
             self._traf_hist.clear()
+            self._cap_warned = False
             self._redraw_graphs()
             return
         rx, tx = t
         self.tr_in.set_text(human_bytes(rx))
         self.tr_out.set_text(human_bytes(tx))
         self.tr_total.set_text(human_bytes(rx + tx))
+        cap = self._datacap_bytes()
+        if cap and (rx + tx) >= cap and not self._cap_warned:
+            self._cap_warned = True
+            self._notify(_("Data cap reached"),
+                         _("{used} used this session").format(
+                             used=human_bytes(rx + tx)))
         now = time.monotonic()
         if self._prev is not None:
             pt, prx, ptx = self._prev
@@ -1119,6 +1176,31 @@ class VPNWindow(Gtk.Window):
         self.btn_start.set_sensitive(not up and not waiting)
         self.btn_restart.set_sensitive(up and not waiting)
         self.btn_stop.set_sensitive(up and not waiting)
+        if waiting:
+            self._set_tray_icon("network-vpn-acquiring-symbolic",
+                                _("Working …"))
+        elif up:
+            self._set_tray_icon("network-vpn-symbolic", _("Connected"))
+        else:
+            self._set_tray_icon("network-vpn-disconnected-symbolic",
+                                _("Disconnected"))
+
+    def _datacap_bytes(self):
+        try:
+            gib = float(self.settings.get("datacap_gib"))
+        except (TypeError, ValueError):
+            return 0
+        return int(gib * 1024 ** 3) if gib > 0 else 0
+
+    def _set_tray_icon(self, name, desc):
+        tray = getattr(self, "tray", None)
+        if tray is None:
+            return
+        try:
+            tray.set_icon_full(name, desc)
+            tray.set_title("WireGuard – " + desc)
+        except Exception:
+            pass
 
     # ---------- watchdog ----------
     def _watchdog_check(self):
@@ -1254,6 +1336,9 @@ class VPNWindow(Gtk.Window):
         grid.attach(e4, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="VPN IPv6"), 0, 1, 1, 1)
         grid.attach(e6, 1, 1, 1, 1)
+        ecap = Gtk.Entry(text=self.settings.get("datacap_gib"))
+        grid.attach(Gtk.Label(label=_("Data cap (GiB, 0 = off)")), 0, 2, 1, 1)
+        grid.attach(ecap, 1, 2, 1, 1)
         box.pack_start(grid, False, False, 0)
         dlg.show_all()
         resp = dlg.run()
@@ -1263,6 +1348,13 @@ class VPNWindow(Gtk.Window):
             self.settings.set("language", new_lang)
             self.settings.set("vpn_ip", e4.get_text().strip())
             self.settings.set("vpn_ip6", e6.get_text().strip())
+            cap = ecap.get_text().strip().replace(",", ".")
+            try:
+                float(cap)
+            except ValueError:
+                cap = "0"
+            self.settings.set("datacap_gib", cap)
+            self._cap_warned = False
             self.vpn_ip = e4.get_text().strip() or None
             self.vpn_ip6 = e6.get_text().strip() or None
             dlg.destroy()

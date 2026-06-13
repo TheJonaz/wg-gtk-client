@@ -1,0 +1,26 @@
+# Maintainer: Jonaz Thern <jonaz@thern.io>
+pkgname=wg-gtk-client
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Minimal GTK desktop client for WireGuard (live graphs, kill switch, watchdog)"
+arch=('any')
+url="https://github.com/TheJonaz/wg-gtk-client"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk3' 'wireguard-tools' 'polkit' 'curl'
+         'nftables' 'iputils')
+optdepends=('libayatana-appindicator: status tray icon'
+            'libnotify: desktop notifications')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    install -Dm755 wg-gtk-client.py "$pkgdir/usr/bin/wg-gtk-client"
+    install -Dm644 packaging/wg-gtk-client.desktop \
+        "$pkgdir/usr/share/applications/wg-gtk-client.desktop"
+    install -Dm644 packaging/wg-gtk-client.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/wg-gtk-client.svg"
+    install -Dm644 packaging/com.thern.wg-gtk-client.policy \
+        "$pkgdir/usr/share/polkit-1/actions/com.thern.wg-gtk-client.policy"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

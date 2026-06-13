@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install linters
+        run: python -m pip install --upgrade pyflakes pycodestyle
+
+      - name: Byte-compile
+        run: python -m py_compile wg-gtk-client.py
+
+      - name: pyflakes (undefined names, unused imports)
+        run: python -m pyflakes wg-gtk-client.py
+
+      - name: pycodestyle (style, config in setup.cfg)
+        run: python -m pycodestyle wg-gtk-client.py
+
+      - name: Validate desktop entry
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq desktop-file-utils
+          desktop-file-validate packaging/wg-gtk-client.desktop
+
+      - name: Shellcheck install/build scripts
+        run: |
+          sudo apt-get install -y -qq shellcheck
+          shellcheck packaging/install.sh packaging/build-deb.sh

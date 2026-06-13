@@ -6,6 +6,9 @@ __pycache__/
 build/
 dist/
 
+# Packaging artifacts
+*.deb
+
 # Editors / OS
 *.swp
 *~
