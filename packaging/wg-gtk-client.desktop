@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WireGuard VPN
+GenericName=VPN Client
+Comment=Start, stop and monitor a WireGuard tunnel
+Exec=wg-gtk-client
+Icon=wg-gtk-client
+Terminal=false
+Categories=Network;Security;GTK;
+Keywords=VPN;WireGuard;wg;tunnel;
+StartupNotify=true

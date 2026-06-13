@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Thern AI Solutions</vendor>
+  <vendor_url>https://www.thern.io</vendor_url>
+
+  <!--
+    OPTIONAL. Installing this policy lets the active local user run wg-quick
+    and the nft kill switch without typing a password every time, which is
+    what makes unattended Auto-reconnect work. Remove it if you prefer to be
+    prompted on every privileged action.
+
+    By default the action below requires authentication (auth_admin_keep);
+    change allow_active to "yes" to make it fully passwordless.
+  -->
+  <action id="com.thern.wg-gtk-client.run">
+    <description>Run wg-gtk-client privileged helper</description>
+    <message>Authentication is required to control the WireGuard tunnel</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
