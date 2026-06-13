@@ -172,6 +172,12 @@ TRANSLATIONS = {
         "{n}s": "{n} s",
         "{n}m": "{n} min",
         "{n}h": "{n} h",
+        "Uptime {t}": "Upptid {t}",
+        "⏱  Latency": "⏱  Latens",
+        "Graph:": "Graf:",
+        "Speed": "Hastighet",
+        "Traffic": "Trafik",
+        "Latency": "Latens",
     },
 }
 
@@ -224,6 +230,7 @@ class Settings:
         "watchdog": "false",
         "killswitch": "false",
         "autostart": "false",
+        "graph": "speed",
     }
 
     def __init__(self):
@@ -356,6 +363,22 @@ def path_mtu_ok(target, mtu, family=4):
         return None
 
 
+def ping_latency(target="1.1.1.1", timeout=2):
+    """Round-trip time in milliseconds to `target`, or None. No privileges."""
+    try:
+        out = subprocess.run(["ping", "-n", "-c", "1", "-W", str(timeout),
+                              target], capture_output=True, text=True,
+                             timeout=timeout + 2)
+        if out.returncode != 0:
+            return None
+        for tok in out.stdout.split():
+            if tok.startswith("time="):
+                return float(tok.split("=", 1)[1])
+    except Exception:
+        return None
+    return None
+
+
 def latest_handshake(name):
     """Seconds since the last handshake, or None if unreadable / never.
     Needs privileges to read `wg show`; silently returns None otherwise."""
@@ -419,6 +442,12 @@ def human_age(secs):
     return _("{n}h").format(n=secs // 3600)
 
 
+def hms(secs):
+    """Format seconds as HH:MM:SS."""
+    secs = int(max(0, secs))
+    return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}"
+
+
 # ===========================================================================
 # Privileged actions (pkexec)
 # ===========================================================================
@@ -478,6 +507,9 @@ class VPNWindow(Gtk.Window):
         self._rates = (None, None)
         self._spd_hist = deque(maxlen=120)   # (down_bps, up_bps) ~10 min
         self._traf_hist = deque(maxlen=120)  # (rx_total, tx_total)
+        self._lat_hist = deque(maxlen=120)   # latency ms
+        self._up_since = None       # monotonic time the tunnel came up
+        self._graph_mode = self.settings.get("graph") or "speed"
         self._dead_strikes = 0      # watchdog
         self._was_up = None
         self._log = []
@@ -537,8 +569,11 @@ class VPNWindow(Gtk.Window):
         self.hs_lbl = Gtk.Label(label="")
         self.hs_lbl.get_style_context().add_class("subtle")
         self.hs_lbl.set_xalign(0)
+        self.uptime_lbl = Gtk.Label(label="")
+        self.uptime_lbl.get_style_context().add_class("subtle")
+        self.uptime_lbl.set_xalign(0)
         for w in (self.status_lbl, self.detail_lbl, self.detail6_lbl,
-                  self.proto_lbl, self.mtu_lbl, self.hs_lbl):
+                  self.proto_lbl, self.mtu_lbl, self.hs_lbl, self.uptime_lbl):
             col.pack_start(w, False, False, 0)
         statusbox.pack_start(self.dot, False, False, 0)
         statusbox.pack_start(col, True, True, 0)
@@ -569,28 +604,41 @@ class VPNWindow(Gtk.Window):
         self.tr_out = _row(traf, 2, _("↑  Out (sent)"), "traf-val")
         self.tr_total = _row(traf, 3, _("Σ  Total"), "traf-total")
 
-        self.traffic_area = Gtk.DrawingArea()
-        self.traffic_area.set_size_request(-1, 58)
-        self.traffic_area.set_hexpand(True)
-        self.traffic_area.set_margin_top(6)
-        self.traffic_area.connect("draw", self._draw_traffic)
-        traf.attach(self.traffic_area, 0, 4, 2, 1)
-
         sphead = Gtk.Label(label=_("SPEED (current)"))
         sphead.get_style_context().add_class("traf-head")
         sphead.set_xalign(0)
         sphead.set_margin_top(8)
-        traf.attach(sphead, 0, 5, 2, 1)
-        self.sp_down = _row(traf, 6, _("↓  Down"), "traf-val")
-        self.sp_up = _row(traf, 7, _("↑  Up"), "traf-val")
-
-        self.speed_area = Gtk.DrawingArea()
-        self.speed_area.set_size_request(-1, 58)
-        self.speed_area.set_hexpand(True)
-        self.speed_area.set_margin_top(6)
-        self.speed_area.connect("draw", self._draw_speed)
-        traf.attach(self.speed_area, 0, 8, 2, 1)
+        traf.attach(sphead, 0, 4, 2, 1)
+        self.sp_down = _row(traf, 5, _("↓  Down"), "traf-val")
+        self.sp_up = _row(traf, 6, _("↑  Up"), "traf-val")
+        self.lat_val = _row(traf, 7, _("⏱  Latency"), "traf-val")
         outer.pack_start(traf, False, False, 0)
+        outer.pack_start(Gtk.Separator(), False, False, 0)
+
+        # --- single switchable live graph (Speed / Traffic / Latency) ---
+        gsec = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        gsec.set_border_width(16)
+        ghead = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        glbl = Gtk.Label(label=_("Graph:"))
+        glbl.get_style_context().add_class("traf-head")
+        glbl.set_xalign(0)
+        self.graph_combo = Gtk.ComboBoxText()
+        for code, name in (("speed", _("Speed")), ("traffic", _("Traffic")),
+                           ("latency", _("Latency"))):
+            self.graph_combo.append(code, name)
+        self.graph_combo.set_active_id(
+            self._graph_mode if self._graph_mode in
+            ("speed", "traffic", "latency") else "speed")
+        self.graph_combo.connect("changed", self._on_graph_changed)
+        ghead.pack_start(glbl, False, False, 0)
+        ghead.pack_end(self.graph_combo, False, False, 0)
+        gsec.pack_start(ghead, False, False, 0)
+        self.graph_area = Gtk.DrawingArea()
+        self.graph_area.set_size_request(-1, 88)
+        self.graph_area.set_hexpand(True)
+        self.graph_area.connect("draw", self._draw_graph)
+        gsec.pack_start(self.graph_area, True, True, 0)
+        outer.pack_start(gsec, False, False, 0)
         outer.pack_start(Gtk.Separator(), False, False, 0)
 
         # --- Toggles ---
@@ -809,7 +857,26 @@ class VPNWindow(Gtk.Window):
         if not self.busy:
             self.refresh(check_ip=False)
             self._watchdog_check()
+            if iface_up(self.interface):
+                threading.Thread(target=self._latency_worker,
+                                 daemon=True).start()
         return True
+
+    def _latency_worker(self):
+        ms = ping_latency()
+        GLib.idle_add(self._latency_result, ms)
+
+    def _latency_result(self, ms):
+        if not iface_up(self.interface):
+            return False
+        if ms is not None:
+            self._lat_hist.append(ms)
+            self.lat_val.set_text(f"{ms:.0f} ms")
+        else:
+            self.lat_val.set_text("–")
+        if self._graph_mode == "latency":
+            self._redraw_graphs()
+        return False
 
     def refresh(self, check_ip=False):
         up = iface_up(self.interface)
@@ -836,9 +903,16 @@ class VPNWindow(Gtk.Window):
                 (ctx.add_class if self._mtu_warn else ctx.remove_class)("warn")
             else:
                 self.mtu_lbl.set_text("")
+            if self._up_since is None:
+                self._up_since = time.monotonic()
+            self.uptime_lbl.set_text(
+                _("Uptime {t}").format(t=hms(time.monotonic() - self._up_since)))
         else:
             self.hs_lbl.set_text("")
             self.mtu_lbl.set_text("")
+            self.uptime_lbl.set_text("")
+            self.lat_val.set_text("–")
+            self._up_since = None
         if up and check_ip and self.check_public_ip:
             self.detail_lbl.set_text(_("Checking public IP …"))
             self.detail6_lbl.set_text("")
@@ -905,18 +979,24 @@ class VPNWindow(Gtk.Window):
 
     # ---------- live graphs (Cairo, no extra deps) ----------
     def _redraw_graphs(self):
-        for a in (getattr(self, "traffic_area", None),
-                  getattr(self, "speed_area", None)):
-            if a is not None:
-                a.queue_draw()
+        a = getattr(self, "graph_area", None)
+        if a is not None:
+            a.queue_draw()
+
+    def _on_graph_changed(self, combo):
+        mode = combo.get_active_id() or "speed"
+        self._graph_mode = mode
+        self.settings.set("graph", mode)
+        self._redraw_graphs()
 
     def _theme_fg(self):
         rgba = self.get_style_context().get_color(Gtk.StateFlags.NORMAL)
         return (rgba.red, rgba.green, rgba.blue)
 
-    # series colors: In/Down green #2ecc71, Out/Up orange #e67e22
+    # series colors: In/Down green #2ecc71, Out/Up orange #e67e22, latency blue
     _C_DOWN = (0.18, 0.80, 0.44)
     _C_UP = (0.90, 0.49, 0.13)
+    _C_LAT = (0.20, 0.55, 0.90)
 
     def _plot(self, area, cr, series, scale_label):
         w = area.get_allocated_width()
@@ -968,19 +1048,22 @@ class VPNWindow(Gtk.Window):
         cr.show_text(label)
         return False
 
-    def _draw_speed(self, area, cr):
+    def _draw_graph(self, area, cr):
+        if self._graph_mode == "traffic":
+            rin = [r for r, t in self._traf_hist]
+            rout = [t for r, t in self._traf_hist]
+            return self._plot(area, cr,
+                              [(rin, self._C_DOWN), (rout, self._C_UP)],
+                              human_bytes)
+        if self._graph_mode == "latency":
+            lat = list(self._lat_hist)
+            return self._plot(area, cr, [(lat, self._C_LAT)],
+                              lambda m: f"{m:.0f} ms")
         down = [d for d, u in self._spd_hist]
         up = [u for d, u in self._spd_hist]
         return self._plot(area, cr,
                           [(down, self._C_DOWN), (up, self._C_UP)],
                           lambda m: human_bytes(m) + "/s")
-
-    def _draw_traffic(self, area, cr):
-        rin = [r for r, t in self._traf_hist]
-        rout = [t for r, t in self._traf_hist]
-        return self._plot(area, cr,
-                          [(rin, self._C_DOWN), (rout, self._C_UP)],
-                          human_bytes)
 
     def _ip_worker(self):
         ip4 = fetch_public_ip(4)
